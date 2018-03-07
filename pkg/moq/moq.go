@@ -11,12 +11,8 @@ import (
 	"go/types"
 	"io"
 	"os"
-	"path"
-	"path/filepath"
 	"strings"
 	"text/template"
-
-	"golang.org/x/tools/go/loader"
 )
 
 // This list comes from the golint codebase. Golint will complain about any of
@@ -79,13 +75,11 @@ func New(src, packageName string) (*Mocker, error) {
 	noTestFiles := func(i os.FileInfo) bool {
 		return !strings.HasSuffix(i.Name(), "_test.go")
 	}
-
 	pkgs, err := parser.ParseDir(fset, src, noTestFiles, parser.SpuriousErrors)
 	if err != nil {
 		return nil, err
 	}
 	if len(packageName) == 0 {
-
 		for pkgName := range pkgs {
 			if strings.Contains(pkgName, "_test") {
 				continue
@@ -116,56 +110,57 @@ func (m *Mocker) Mock(w io.Writer, name ...string) error {
 	if len(name) == 0 {
 		return errors.New("must specify one interface")
 	}
-
-	pkgInfo, err := m.pkgInfoFromPath(m.src)
-	if err != nil {
-		return err
-	}
-
 	doc := doc{
 		PackageName: m.pkgName,
 		Imports:     moqImports,
 	}
-
 	mocksMethods := false
-
-	tpkg := pkgInfo.Pkg
-	for _, n := range name {
-		iface := tpkg.Scope().Lookup(n)
-		if iface == nil {
-			return fmt.Errorf("cannot find interface %s", n)
+	for _, pkg := range m.pkgs {
+		i := 0
+		files := make([]*ast.File, len(pkg.Files))
+		for _, file := range pkg.Files {
+			files[i] = file
+			i++
 		}
-		if !types.IsInterface(iface.Type()) {
-			return fmt.Errorf("%s (%s) not an interface", n, iface.Type().String())
+		conf := types.Config{Importer: newImporter(m.src)}
+		tpkg, err := conf.Check(m.src, m.fset, files, nil)
+		if err != nil {
+			return err
 		}
-		iiface := iface.Type().Underlying().(*types.Interface).Complete()
-		obj := obj{
-			InterfaceName: n,
-		}
-		for i := 0; i < iiface.NumMethods(); i++ {
-			mocksMethods = true
-			meth := iiface.Method(i)
-			sig := meth.Type().(*types.Signature)
-			method := &method{
-				Name: meth.Name(),
+		for _, n := range name {
+			iface := tpkg.Scope().Lookup(n)
+			if iface == nil {
+				return fmt.Errorf("cannot find interface %s", n)
 			}
-			obj.Methods = append(obj.Methods, method)
-			method.Params = m.extractArgs(sig, sig.Params(), "in%d")
-			method.Returns = m.extractArgs(sig, sig.Results(), "out%d")
+			if !types.IsInterface(iface.Type()) {
+				return fmt.Errorf("%s (%s) not an interface", n, iface.Type().String())
+			}
+			iiface := iface.Type().Underlying().(*types.Interface).Complete()
+			obj := obj{
+				InterfaceName: n,
+			}
+			for i := 0; i < iiface.NumMethods(); i++ {
+				mocksMethods = true
+				meth := iiface.Method(i)
+				sig := meth.Type().(*types.Signature)
+				method := &method{
+					Name: meth.Name(),
+				}
+				obj.Methods = append(obj.Methods, method)
+				method.Params = m.extractArgs(sig, sig.Params(), "in%d")
+				method.Returns = m.extractArgs(sig, sig.Results(), "out%d")
+			}
+			doc.Objects = append(doc.Objects, obj)
 		}
-		doc.Objects = append(doc.Objects, obj)
 	}
-
 	if mocksMethods {
 		doc.Imports = append(doc.Imports, "sync")
 	}
-
 	for pkgToImport := range m.imports {
-		doc.Imports = append(doc.Imports, stripVendorPath(pkgToImport))
+		doc.Imports = append(doc.Imports, pkgToImport)
 	}
-
 	var buf bytes.Buffer
-	err = m.tmpl.Execute(&buf, doc)
+	err := m.tmpl.Execute(&buf, doc)
 	if err != nil {
 		return err
 	}
@@ -214,32 +209,6 @@ func (m *Mocker) extractArgs(sig *types.Signature, list *types.Tuple, nameFormat
 		params = append(params, param)
 	}
 	return params
-}
-
-func (*Mocker) pkgInfoFromPath(src string) (*loader.PackageInfo, error) {
-
-	abs, err := filepath.Abs(src)
-	if err != nil {
-		return nil, err
-	}
-	pkgFull := stripGopath(abs)
-
-	conf := loader.Config{
-		ParserMode: parser.SpuriousErrors,
-		Cwd:        src,
-	}
-	conf.Import(pkgFull)
-	lprog, err := conf.Load()
-	if err != nil {
-		return nil, err
-	}
-
-	pkgInfo := lprog.Package(pkgFull)
-	if pkgInfo == nil {
-		return nil, errors.New("package was nil")
-	}
-
-	return pkgInfo, nil
 }
 
 type doc struct {
@@ -321,32 +290,4 @@ var templateFuncs = template.FuncMap{
 		}
 		return strings.ToUpper(s[0:1]) + s[1:]
 	},
-}
-
-// stripVendorPath strips the vendor dir prefix from a package path.
-// For example we might encounter an absolute path like
-// github.com/foo/bar/vendor/github.com/pkg/errors which is resolved
-// to github.com/pkg/errors.
-func stripVendorPath(p string) string {
-	parts := strings.Split(p, "/vendor/")
-	if len(parts) == 1 {
-		return p
-	}
-	return strings.TrimLeft(path.Join(parts[1:]...), "/")
-}
-
-// stripGopath takes the directory to a package and remove the gopath to get the
-// canonical package name.
-//
-// taken from https://github.com/ernesto-jimenez/gogen
-// Copyright (c) 2015 Ernesto Jiménez
-func stripGopath(p string) string {
-	for _, gopath := range gopaths() {
-		p = strings.TrimPrefix(p, path.Join(gopath, "src")+"/")
-	}
-	return p
-}
-
-func gopaths() []string {
-	return strings.Split(os.Getenv("GOPATH"), string(filepath.ListSeparator))
 }
