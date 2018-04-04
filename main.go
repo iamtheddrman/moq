@@ -9,7 +9,7 @@ import (
 	"io/ioutil"
 	"os"
 
-	"github.com/matryer/moq/pkg/moq"
+	"github.com/iamtheddrman/moq/pkg/moq"
 )
 
 func main() {
